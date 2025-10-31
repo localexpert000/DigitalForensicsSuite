@@ -13,20 +13,22 @@ import importlib.util
 # Import your core analysis script functions
 from acquisition import perform_forensic_imaging, verify_integrity
 from analysis import perform_file_carving, analyze_disk_image, analyze_registry_hive, analyze_memory_dump 
+from timeline_generator import generate_super_timeline 
+# NEW IMPORT: Import the function from the new network_analysis.py script
+from network_analysis import analyze_pcap_file 
 
-# --- Console Output Redirect Class (Part 1, Step 2) ---
-# This captures all stdout (print statements) and redirects them to the QTextEdit widget
+
+# --- Console Output Redirect Class ---
 class ConsoleRedirector(object):
     def __init__(self, widget):
         self.widget = widget
 
     def write(self, text):
-        # Only append text that isn't empty, to prevent excessive blank lines
         if text.strip():
             self.widget.append(text.strip())
 
     def flush(self):
-        pass # Required for file-like object
+        pass 
 
 # --- 1. Worker Thread Class ---
 class ForensicWorker(QThread):
@@ -38,7 +40,7 @@ class ForensicWorker(QThread):
         self.func = func
         self.args = args
         self.kwargs = kwargs
-        self.setObjectName(f"WORKER-{func.__name__.upper()}")
+        self.setObjectName(f"WORKER-{self.func.__name__.upper()}")
 
     def run(self):
         self.progress_update.emit(f"Running task: {self.func.__name__}...")
@@ -51,13 +53,11 @@ class ForensicWorker(QThread):
                 else:
                     self.finished.emit(self.func.__name__, "Acquisition failed. Check console for details.")
             
-            # --- Analysis Logic & Plugin Logic ---
-            elif self.func in [analyze_disk_image, perform_file_carving, analyze_registry_hive, analyze_memory_dump] or hasattr(self.func, '__self__') and isinstance(self.func.__self__, object):
-                # The plugin.run() method is executed here.
-                # If the function is a method (like run_plugin), it returns a summary message.
+            # --- Analysis Logic, including Timeline and Network Analysis ---
+            # NOTE: analyze_pcap_file is added to this list
+            elif self.func in [analyze_disk_image, perform_file_carving, analyze_registry_hive, analyze_memory_dump, generate_super_timeline, analyze_pcap_file] or hasattr(self.func, '__self__') and isinstance(self.func.__self__, object):
                 result = self.func(*self.args) 
                 
-                # Check if the analysis function returned a string result (for plugin or summary)
                 if isinstance(result, str) and result:
                      self.finished.emit(self.func.__name__, result)
                 else:
@@ -73,7 +73,7 @@ class DigitalForensicsSuite(QMainWindow):
         self.setWindowTitle("Digital Forensics Suite - Console")
         self.setGeometry(100, 100, 1000, 700)
         
-        # --- Apply Dark Theme Stylesheet (Part 1, Step 1) ---
+        # --- Apply Dark Theme Stylesheet ---
         dark_stylesheet = """
         QMainWindow { background-color: #1e1e1e; color: #d4d4d4; }
         QTextEdit { background-color: #252526; color: #d4d4d4; border: 1px solid #3c3c3c; font-family: 'Consolas', 'Courier New', monospace; }
@@ -92,7 +92,7 @@ class DigitalForensicsSuite(QMainWindow):
         self.current_hive_path = None
         self.current_dump_path = None
         self.current_worker = None
-        self.plugins = {} # Store dynamically loaded plugins
+        self.plugins = {} 
         
         # --- UI Components ---
         self.central_widget = QWidget()
@@ -102,18 +102,18 @@ class DigitalForensicsSuite(QMainWindow):
         # Output Console
         self.console = QTextEdit()
         self.console.setReadOnly(True)
-        self.console.setFontPointSize(10) # Hacking-friendly font size
+        self.console.setFontPointSize(10)
         self.layout.addWidget(QLabel("Analysis Console:"))
         self.layout.addWidget(self.console)
         
-        # Redirect stdout and stderr (Part 1, Step 2)
+        # Redirect stdout and stderr
         sys.stdout = ConsoleRedirector(self.console)
         sys.stderr = ConsoleRedirector(self.console) 
         
         # Status Bar
         self.statusBar().showMessage("Ready for operation.")
         
-        self.load_plugins() # <<< ADDED: Load plugins before menu creation
+        self.load_plugins()
         self.create_menu()
 
 
@@ -123,29 +123,29 @@ class DigitalForensicsSuite(QMainWindow):
         
         self.log("\n[+] Scanning for and loading external plugins...")
         
-        for name in os.listdir(plugin_root):
-            if os.path.isdir(os.path.join(plugin_root, name)) and not name.startswith('__'):
-                # Assumes plugin code is named module_name/module_name.py
-                plugin_file_name = f"{name}_parser.py" # Based on prompt structure
-                plugin_file_path = os.path.join(plugin_root, name, plugin_file_name)
+        # Plugin loading logic (as per Phase 4, Task 14)
+        if os.path.exists(plugin_root):
+            for name in os.listdir(plugin_root):
+                if os.path.isdir(os.path.join(plugin_root, name)) and not name.startswith('__'):
+                    plugin_file_name = f"{name}_parser.py"
+                    plugin_file_path = os.path.join(plugin_root, name, plugin_file_name)
 
-                if not os.path.exists(plugin_file_path):
-                    continue
+                    if not os.path.exists(plugin_file_path):
+                        continue
 
-                try:
-                    spec = importlib.util.spec_from_file_location(name, plugin_file_path)
-                    module = importlib.util.module_from_spec(spec)
-                    sys.modules[name] = module
-                    spec.loader.exec_module(module)
-                    
-                    # Get the plugin class via a helper function from the module
-                    plugin_class = getattr(module, 'get_plugin_class')()
-                    
-                    self.plugins[plugin_class.NAME] = plugin_class
-                    self.log(f"|-- LOADED PLUGIN: {plugin_class.NAME}")
-                    
-                except Exception as e:
-                    self.log(f"|-- FAILED to load plugin {name}: {e}")
+                    try:
+                        spec = importlib.util.spec_from_file_location(name, plugin_file_path)
+                        module = importlib.util.module_from_spec(spec)
+                        sys.modules[name] = module
+                        spec.loader.exec_module(module)
+                        
+                        plugin_class = getattr(module, 'get_plugin_class')()
+                        
+                        self.plugins[plugin_class.NAME] = plugin_class
+                        self.log(f"|-- LOADED PLUGIN: {plugin_class.NAME}")
+                        
+                    except Exception as e:
+                        self.log(f"|-- FAILED to load plugin {name}: {e}")
         
         self.log(f"Loaded {len(self.plugins)} plugins.")
 
@@ -154,15 +154,11 @@ class DigitalForensicsSuite(QMainWindow):
         
         # --- File Menu (Acquisition/Loading) ---
         file_menu = menu_bar.addMenu("&File")
-        
         acq_action = file_menu.addAction("Start Disk &Acquisition...")
         acq_action.triggered.connect(self.start_acquisition_dialog)
-        
         load_action = file_menu.addAction("&Load Forensic Image...")
         load_action.triggered.connect(self.load_image_dialog)
-        
         file_menu.addSeparator()
-        
         verify_action = file_menu.addAction("&Verify Integrity (Hash Check)")
         verify_action.triggered.connect(self.start_integrity_check)
         
@@ -175,6 +171,13 @@ class DigitalForensicsSuite(QMainWindow):
         carve_action = analysis_menu.addAction("Start &Data Carving...")
         carve_action.triggered.connect(self.start_carving_analysis)
         
+        timeline_action = analysis_menu.addAction("&Super Timeline Generation (Plaso)")
+        timeline_action.triggered.connect(self.start_timeline_analysis)
+        
+        # Network Analysis (P2/P3 Feature) <<< ADDED
+        network_action = analysis_menu.addAction("&Network Analysis (Scapy/PCAP)")
+        network_action.triggered.connect(self.start_network_analysis)
+        
         analysis_menu.addSeparator()
 
         reg_action = analysis_menu.addAction("&Windows Registry Analysis (Regipy)")
@@ -183,12 +186,11 @@ class DigitalForensicsSuite(QMainWindow):
         mem_action = analysis_menu.addAction("&Memory Analysis (Volatility3)")
         mem_action.triggered.connect(self.start_memory_analysis)
         
-        # --- Plugins Menu (Part 2, Step 3) ---
+        # --- Plugins Menu ---
         if self.plugins:
             plugins_menu = menu_bar.addMenu("&Plugins")
             for name, plugin_class in self.plugins.items():
                 action = plugins_menu.addAction(name)
-                # Use lambda to pass the plugin class to run_plugin
                 action.triggered.connect(lambda checked, p=plugin_class: self.run_plugin(p))
 
 
@@ -200,17 +202,13 @@ class DigitalForensicsSuite(QMainWindow):
         self.current_worker = None
 
     def start_acquisition_dialog(self):
-        # ... (Acquisition dialog and thread startup logic) ...
         self.log("Opening acquisition dialog...")
-        
         source_device, _ = QFileDialog.getOpenFileName(self, "Select Source Device/File (Run as Admin for Devices)")
         output_image, _ = QFileDialog.getSaveFileName(self, "Save Output Forensic Image (.dd)")
-        
         if source_device and output_image:
             log_file = output_image + ".log"
             self.log(f"Acquisition setup: Source={source_device}, Output={output_image}")
             self.statusBar().showMessage("Acquisition in progress...")
-
             self.current_worker = ForensicWorker(perform_forensic_imaging, source_device, output_image, log_file)
             self.current_worker.finished.connect(self.task_finished)
             self.current_worker.start()
@@ -249,6 +247,31 @@ class DigitalForensicsSuite(QMainWindow):
         self.current_worker = ForensicWorker(perform_file_carving, self.current_image_path, output_dir)
         self.current_worker.finished.connect(self.task_finished)
         self.current_worker.start()
+        
+    def start_timeline_analysis(self):
+        if not self.current_image_path:
+            self.log("ERROR: Please load a forensic image first (File -> Load Forensic Image).")
+            return
+            
+        self.log(f"Starting Plaso Super Timeline Generation on {self.current_image_path}...")
+        self.statusBar().showMessage("Generating super timeline... (This may take a while)")
+        
+        self.current_worker = ForensicWorker(generate_super_timeline, self.current_image_path)
+        self.current_worker.finished.connect(self.task_finished)
+        self.current_worker.start()
+
+    def start_network_analysis(self):
+        # Load the PCAP file
+        pcap_path, _ = QFileDialog.getOpenFileName(self, "Select Network Capture File (.pcap, .pcapng)")
+        
+        if pcap_path:
+            self.log(f"Starting Network Traffic Analysis on {pcap_path}...")
+            self.statusBar().showMessage("Analyzing network packets...")
+            
+            # Start the Scapy task in a background thread
+            self.current_worker = ForensicWorker(analyze_pcap_file, pcap_path)
+            self.current_worker.finished.connect(self.task_finished)
+            self.current_worker.start()
 
     def start_registry_analysis(self):
         hive_path, _ = QFileDialog.getOpenFileName(self, "Select Registry Hive File (e.g., SYSTEM_TEST_HIVE.DAT)", filter="Registry Hives (*.dat *.hiv);;All Files (*)")
@@ -268,7 +291,6 @@ class DigitalForensicsSuite(QMainWindow):
             self.current_worker.finished.connect(self.task_finished)
             self.current_worker.start()
 
-    # --- Plugin Execution Logic (Part 2, Step 3) ---
     def run_plugin(self, plugin_class):
         if not self.current_image_path and plugin_class.TARGET_TYPE == "disk_image":
             self.log("ERROR: Plugin requires a loaded forensic image (File -> Load Forensic Image).")
@@ -277,11 +299,8 @@ class DigitalForensicsSuite(QMainWindow):
         self.log(f"Starting Plugin: {plugin_class.NAME}...")
         self.statusBar().showMessage(f"Running custom plugin: {plugin_class.NAME}...")
         
-        # Instantiate and run the plugin in the worker thread
-        # The constructor must match the plugin interface defined in browser_parser.py
         plugin_instance = plugin_class(self.current_image_path, "plugin_output")
         
-        # We pass the instance's .run method to the worker
         self.current_worker = ForensicWorker(plugin_instance.run)
         self.current_worker.finished.connect(self.task_finished)
         self.current_worker.start()
