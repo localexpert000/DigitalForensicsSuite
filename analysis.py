@@ -2,12 +2,10 @@ import pytsk3
 import os
 import sys
 import hashlib
+import subprocess # <-- NEW IMPORT for running Volatility
 from regipy.registry import RegistryHive
 from regipy.plugins.utils import run_relevant_plugins
-# CORRECTED IMPORT: Using the ShimcachePlugin (shimcache.py) which is confirmed to be installed.
-from regipy.plugins.system.shimcache import ShimCachePlugin
-# You could also use usbstor.py for USB device history if needed:
-# from regipy.plugins.system.usbstor import UsbstorPlugin
+from regipy.plugins.system.shimcache import ShimCachePlugin # Corrected Case
 
 
 # Define constants for file types (TSK standard)
@@ -100,7 +98,6 @@ def analyze_disk_image(image_path):
 # --- File Carving Function ---
 def perform_file_carving(image_path, output_directory, signatures=FILE_SIGNATURES):
     """Scans the raw image data for file signatures and carves out the data."""
-    # ... (function body remains the same) ...
     print(f"\n[+] Starting File Carving on raw data of: {image_path}")
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
@@ -145,11 +142,11 @@ def perform_file_carving(image_path, output_directory, signatures=FILE_SIGNATURE
     except Exception as e:
         print(f"An error occurred during carving: {e}")
 
-# --- New Registry Analysis Function (MODIFIED FOR SHIMCACHE) ---
+# --- Registry Analysis Function ---
 def analyze_registry_hive(hive_path, registry_name):
     """
     Loads a Windows Registry hive and runs forensic plugins to extract artifacts.
-    Now uses the ShimcachePlugin for Program Execution Analysis.
+    Now uses the ShimCachePlugin for Program Execution Analysis.
     """
     print(f"\n[+] Starting Registry Analysis on: {registry_name} Hive ({hive_path})")
     
@@ -158,37 +155,82 @@ def analyze_registry_hive(hive_path, registry_name):
         return
 
     try:
-        # Load the Registry Hive object
         registry_hive = RegistryHive(hive_path)
         
-        # --- MODIFIED: Running the ShimcachePlugin (a crucial artifact) ---
         print("--- EXTRACTING PROGRAM EXECUTION ARTIFACTS (Shimcache/P2) ---")
         
-        shimcache_plugin = ShimcachePlugin(registry_hive, as_json=True)
+        shimcache_plugin = ShimCachePlugin(registry_hive, as_json=True)
         shimcache_plugin.run()
         
         results = shimcache_plugin.entries
         
         if results:
             print(f"Found {len(results)} Shimcache entries (recently executed programs):")
-            # Print the first few results
             for i, entry in enumerate(results):
-                # Shimcache entries contain 'path', 'mtime' (last modification time) and 'lntime' (last execution time)
                 print(f"  [{i+1}] Executable: {entry.get('path')}")
                 print(f"      Last Modified Time: {entry.get('mtime')}")
-                if i >= 4: # Limit output for console view
+                if i >= 4:
                     print("  ... and more (full data available in JSON output)")
                     break
         else:
             print("No Shimcache entries extracted.")
 
-        # Optional: Run all relevant plugins 
-        # print("\n--- RUNNING ALL RELEVANT PLUGINS (Requires regipy[full] installation) ---")
-        # all_plugin_results = run_relevant_plugins(registry_hive, as_json=True)
-        # print(f"Total plugins executed: {len(all_plugin_results)}")
-
     except Exception as e:
         print(f"An error occurred during Registry Analysis: {e}")
+
+
+# --- New Memory Analysis Function (P2 Features) ---
+def analyze_memory_dump(memory_dump_path):
+    """
+    Analyzes a memory dump using the Volatility3 framework via subprocess.
+    This demonstrates Process Memory Dumping and Network Connection Reconstruction.
+    """
+    print(f"\n[+] Starting Memory Analysis on: {memory_dump_path}")
+    
+    if not os.path.exists(memory_dump_path):
+        print(f"ERROR: Memory dump file not found at {memory_dump_path}")
+        return
+
+    # Volatility3 command to list processes (crucial artifact)
+    process_list_command = [
+        'vol.py', 
+        '-f', memory_dump_path, 
+        'windows.pslist.PsList' # Plugin to list running processes
+    ]
+
+    # Volatility3 command to list active network connections
+    netscan_command = [
+        'vol.py', 
+        '-f', memory_dump_path, 
+        'windows.netscan.NetScan' # Plugin for Network Connection Reconstruction (P2)
+    ]
+
+    # --- EXECUTE PSLIST (Process Analysis) ---
+    print("\n--- Running windows.pslist.PsList (Processes) ---")
+    try:
+        # We need to run these commands in the shell
+        process_result = subprocess.run(process_list_command, 
+                                        capture_output=True, 
+                                        text=True, 
+                                        check=True)
+        print(process_result.stdout)
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: Volatility PsList failed. Ensure dump is valid. Error: {e.stderr}")
+    except FileNotFoundError:
+        print("CRITICAL ERROR: 'vol.py' (Volatility3) command not found. Check installation and PATH.")
+        
+    # --- EXECUTE NETSCAN (Network Analysis) ---
+    print("\n--- Running windows.netscan.NetScan (Network Connections) ---")
+    try:
+        netscan_result = subprocess.run(netscan_command, 
+                                        capture_output=True, 
+                                        text=True, 
+                                        check=True)
+        print(netscan_result.stdout)
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: Volatility NetScan failed. Ensure dump is valid. Error: {e.stderr}")
+    except FileNotFoundError:
+        pass # Already checked above
 
 
 # --- Example Execution (Updated Main Block) ---
@@ -198,21 +240,27 @@ if __name__ == '__main__':
     CARVED_OUTPUT_DIR = "carved_files_output"
     
     # --- REGISTRY TESTING VARIABLES ---
-    # Shimcache is typically found in the SYSTEM hive, so we change the test name for accuracy.
     MOCK_REGISTRY_HIVE = "SYSTEM_TEST_HIVE.DAT" 
+    
+    # --- MEMORY TESTING VARIABLES ---
+    MOCK_MEMORY_DUMP = "memory.dmp" 
 
-    # --- MOCK SETUP: Create a dummy file to avoid errors if the hive is missing ---
+    # --- SETUP CHECKS ---
     if not os.path.exists(MOCK_REGISTRY_HIVE):
         print(f"\n[!] Place a real Windows 'SYSTEM' hive file here, naming it: {MOCK_REGISTRY_HIVE}")
         try:
-            with open(MOCK_REGISTRY_HIVE, 'w') as f:
-                f.write("")
-        except Exception:
-            pass # Ignore if creation fails
+            with open(MOCK_REGISTRY_HIVE, 'w') as f: f.write("")
+        except Exception: pass
+        
+    if not os.path.exists(MOCK_MEMORY_DUMP):
+        print(f"\n[!] Place a real memory dump file (e.g., acquired via DumpIt) here, naming it: {MOCK_MEMORY_DUMP}")
+        try:
+            with open(MOCK_MEMORY_DUMP, 'w') as f: f.write("")
+        except Exception: pass
 
     # --- EXECUTION ---
     print("\n========================================================")
-    print("           DIGITAL FORENSICS SUITE - ANALYSIS")
+    print("      DIGITAL FORENSICS SUITE - FULL ANALYSIS")
     print("========================================================\n")
     
     # 1. Run File System Analysis (Disk Content Listing)
@@ -222,7 +270,11 @@ if __name__ == '__main__':
     # 2. Run File Carving (Deleted Data Recovery)
     perform_file_carving(IMAGE_TO_ANALYZE, CARVED_OUTPUT_DIR)
 
-    # 3. Run Registry Analysis (The main focus of this task)
+    # 3. Run Registry Analysis 
     analyze_registry_hive(MOCK_REGISTRY_HIVE, "SYSTEM")
     
+    # 4. Run Memory Analysis (NEW FOCUS)
+    analyze_memory_dump(MOCK_MEMORY_DUMP)
+    
     print("\n========================================================\n")
+    
