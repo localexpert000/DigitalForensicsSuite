@@ -14,8 +14,9 @@ import importlib.util
 from acquisition import perform_forensic_imaging, verify_integrity
 from analysis import perform_file_carving, analyze_disk_image, analyze_registry_hive, analyze_memory_dump 
 from timeline_generator import generate_super_timeline 
-# NEW IMPORT: Import the function from the new network_analysis.py script
 from network_analysis import analyze_pcap_file 
+# NEW IMPORT: Import the function from the new android_analysis.py script
+from android_analysis import analyze_android_database 
 
 
 # --- Console Output Redirect Class ---
@@ -53,9 +54,8 @@ class ForensicWorker(QThread):
                 else:
                     self.finished.emit(self.func.__name__, "Acquisition failed. Check console for details.")
             
-            # --- Analysis Logic, including Timeline and Network Analysis ---
-            # NOTE: analyze_pcap_file is added to this list
-            elif self.func in [analyze_disk_image, perform_file_carving, analyze_registry_hive, analyze_memory_dump, generate_super_timeline, analyze_pcap_file] or hasattr(self.func, '__self__') and isinstance(self.func.__self__, object):
+            # --- Analysis Logic, including ALL domains ---
+            elif self.func in [analyze_disk_image, perform_file_carving, analyze_registry_hive, analyze_memory_dump, generate_super_timeline, analyze_pcap_file, analyze_android_database] or hasattr(self.func, '__self__') and isinstance(self.func.__self__, object):
                 result = self.func(*self.args) 
                 
                 if isinstance(result, str) and result:
@@ -123,7 +123,6 @@ class DigitalForensicsSuite(QMainWindow):
         
         self.log("\n[+] Scanning for and loading external plugins...")
         
-        # Plugin loading logic (as per Phase 4, Task 14)
         if os.path.exists(plugin_root):
             for name in os.listdir(plugin_root):
                 if os.path.isdir(os.path.join(plugin_root, name)) and not name.startswith('__'):
@@ -174,9 +173,12 @@ class DigitalForensicsSuite(QMainWindow):
         timeline_action = analysis_menu.addAction("&Super Timeline Generation (Plaso)")
         timeline_action.triggered.connect(self.start_timeline_analysis)
         
-        # Network Analysis (P2/P3 Feature) <<< ADDED
         network_action = analysis_menu.addAction("&Network Analysis (Scapy/PCAP)")
         network_action.triggered.connect(self.start_network_analysis)
+        
+        # Android Forensics Analysis (P3 Feature) <<< ADDED
+        android_action = analysis_menu.addAction("&Android App Data Analysis")
+        android_action.triggered.connect(self.start_android_analysis)
         
         analysis_menu.addSeparator()
 
@@ -268,8 +270,24 @@ class DigitalForensicsSuite(QMainWindow):
             self.log(f"Starting Network Traffic Analysis on {pcap_path}...")
             self.statusBar().showMessage("Analyzing network packets...")
             
-            # Start the Scapy task in a background thread
             self.current_worker = ForensicWorker(analyze_pcap_file, pcap_path)
+            self.current_worker.finished.connect(self.task_finished)
+            self.current_worker.start()
+            
+    def start_android_analysis(self):
+        # Load the SQLite database file
+        db_path, _ = QFileDialog.getOpenFileName(self, "Select Android App Database File (.db, .sqlite)", filter="SQLite Databases (*.db *.sqlite);;All Files (*)")
+        
+        if db_path:
+            # We must import the function from the new script (already imported at the top)
+            # No need to import again if 'from android_analysis import analyze_android_database' is at the top
+            from android_analysis import analyze_android_database
+            
+            self.log(f"Starting Android Data Analysis on {db_path}...")
+            self.statusBar().showMessage("Analyzing mobile app data...")
+            
+            # Start the analysis task in a background thread
+            self.current_worker = ForensicWorker(analyze_android_database, db_path)
             self.current_worker.finished.connect(self.task_finished)
             self.current_worker.start()
 
