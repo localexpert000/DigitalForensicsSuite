@@ -1,14 +1,20 @@
 import pytsk3
 import os
 import sys
+import hashlib
+from regipy.registry import RegistryHive
+from regipy.plugins.utils import run_relevant_plugins
+# CORRECTED IMPORT: Using the ShimcachePlugin (shimcache.py) which is confirmed to be installed.
+from regipy.plugins.system.shimcache import ShimCachePlugin
+# You could also use usbstor.py for USB device history if needed:
+# from regipy.plugins.system.usbstor import UsbstorPlugin
+
 
 # Define constants for file types (TSK standard)
 TSK_FS_TYPE_ENUM = {
     pytsk3.TSK_FS_META_TYPE_UNDEF: "Unknown",
-    # Corrected constant for Regular File in this pytsk3 version
     pytsk3.TSK_FS_META_TYPE_REG: "File", 
     pytsk3.TSK_FS_META_TYPE_DIR: "Directory",
-    # Corrected constant for Link in this pytsk3 version
     pytsk3.TSK_FS_META_TYPE_LNK: "Link",
     pytsk3.TSK_FS_META_TYPE_FIFO: "Pipe",
     pytsk3.TSK_FS_META_TYPE_CHR: "Character Device",
@@ -16,7 +22,6 @@ TSK_FS_TYPE_ENUM = {
 }
 
 # --- New Carving Signatures (Header/Footer based) ---
-# Hexadecimal byte patterns used for file carving
 FILE_SIGNATURES = {
     "JPEG": {
         "header": b'\xFF\xD8\xFF\xE0',
@@ -35,24 +40,19 @@ FILE_SIGNATURES = {
     }
 }
 
-# --- File System Traversal Function (FINAL CORRECTED VERSION) ---
+# --- File System Traversal Function ---
 def traverse_directory(directory, fs, depth):
     """Recursively traverses directories to list files and folders."""
     
-    # Using two spaces for indentation consistency
     indent = "  " * depth
     
     for entry in directory:
-        # TSK structures contain . and .. entries; skip them for cleaner output
-        if entry.info.name.name in [b".", b".."]: # Compare to bytes literal if needed
+        if entry.info.name.name in [b".", b".."]:
             continue
 
-        # --- FIX: Decode file name inside the loop ---
         try:
-            # Attempt to decode the name bytes (usually UTF-8)
             file_name = entry.info.name.name.decode('utf-8')
         except UnicodeDecodeError:
-            # Fallback for corrupted or non-UTF-8 names
             file_name = entry.info.name.name.decode('latin-1') 
         
         if entry.info.meta:
@@ -72,29 +72,21 @@ def traverse_directory(directory, fs, depth):
                 except Exception as e:
                     print(f"{indent}|-- ERROR: Cannot open subdirectory for i-node {inode}: {e}")
 
-# --- File System Analysis Function (MODIFIED TO SUPPORT RAW FS IMAGE) ---
+# --- File System Analysis Function ---
 def analyze_disk_image(image_path):
-    """
-    Opens a disk image and attempts to open the file system directly (no partition table).
-    """
+    """Opens a disk image and attempts to open the file system directly (no partition table)."""
     print(f"\n[+] Starting File System Analysis on: {image_path}")
     
     try:
-        # Step 1: Get the Image Handle (Img_Info)
         img = pytsk3.Img_Info(image_path)
-        
         print("\n[--- DIRECT FILE SYSTEM ANALYSIS (Attempting at Offset 0) ---]")
         
-        # Step 2: Attempt to Open the File System (FS_Info) directly at offset 0
         try:
             fs = pytsk3.FS_Info(img, offset=0) 
             print(f"| Status: SUCCESS | FS Type: {fs.info.ftype} | Block Size: {fs.info.block_size}")
             
-            # Call the recursive function to traverse and list files
             print("\n[--- ACTIVE FILE LISTING ---]")
             root_dir = fs.open_dir(path="/")
-            
-            # Start the recursive directory traversal from the root
             traverse_directory(root_dir, fs, depth=0)
             
         except IOError as e:
@@ -107,9 +99,8 @@ def analyze_disk_image(image_path):
 
 # --- File Carving Function ---
 def perform_file_carving(image_path, output_directory, signatures=FILE_SIGNATURES):
-    """
-    Scans the raw image data for file signatures and carves out the data.
-    """
+    """Scans the raw image data for file signatures and carves out the data."""
+    # ... (function body remains the same) ...
     print(f"\n[+] Starting File Carving on raw data of: {image_path}")
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
@@ -154,18 +145,84 @@ def perform_file_carving(image_path, output_directory, signatures=FILE_SIGNATURE
     except Exception as e:
         print(f"An error occurred during carving: {e}")
 
+# --- New Registry Analysis Function (MODIFIED FOR SHIMCACHE) ---
+def analyze_registry_hive(hive_path, registry_name):
+    """
+    Loads a Windows Registry hive and runs forensic plugins to extract artifacts.
+    Now uses the ShimcachePlugin for Program Execution Analysis.
+    """
+    print(f"\n[+] Starting Registry Analysis on: {registry_name} Hive ({hive_path})")
+    
+    if not os.path.exists(hive_path):
+        print(f"ERROR: Registry hive file not found at {hive_path}. Cannot proceed.")
+        return
+
+    try:
+        # Load the Registry Hive object
+        registry_hive = RegistryHive(hive_path)
+        
+        # --- MODIFIED: Running the ShimcachePlugin (a crucial artifact) ---
+        print("--- EXTRACTING PROGRAM EXECUTION ARTIFACTS (Shimcache/P2) ---")
+        
+        shimcache_plugin = ShimcachePlugin(registry_hive, as_json=True)
+        shimcache_plugin.run()
+        
+        results = shimcache_plugin.entries
+        
+        if results:
+            print(f"Found {len(results)} Shimcache entries (recently executed programs):")
+            # Print the first few results
+            for i, entry in enumerate(results):
+                # Shimcache entries contain 'path', 'mtime' (last modification time) and 'lntime' (last execution time)
+                print(f"  [{i+1}] Executable: {entry.get('path')}")
+                print(f"      Last Modified Time: {entry.get('mtime')}")
+                if i >= 4: # Limit output for console view
+                    print("  ... and more (full data available in JSON output)")
+                    break
+        else:
+            print("No Shimcache entries extracted.")
+
+        # Optional: Run all relevant plugins 
+        # print("\n--- RUNNING ALL RELEVANT PLUGINS (Requires regipy[full] installation) ---")
+        # all_plugin_results = run_relevant_plugins(registry_hive, as_json=True)
+        # print(f"Total plugins executed: {len(all_plugin_results)}")
+
+    except Exception as e:
+        print(f"An error occurred during Registry Analysis: {e}")
+
 
 # --- Example Execution (Updated Main Block) ---
 if __name__ == '__main__':
-    # *** IMPORTANT: This is the name of the image you successfully created and populated. ***
+    # --- DISK IMAGE VARIABLES ---
     IMAGE_TO_ANALYZE = "test_image.dd" 
     CARVED_OUTPUT_DIR = "carved_files_output"
+    
+    # --- REGISTRY TESTING VARIABLES ---
+    # Shimcache is typically found in the SYSTEM hive, so we change the test name for accuracy.
+    MOCK_REGISTRY_HIVE = "SYSTEM_TEST_HIVE.DAT" 
 
-    if not os.path.exists(IMAGE_TO_ANALYZE):
-        print(f"FATAL: Image file '{IMAGE_TO_ANALYZE}' not found. Please create a mock image with a file system first.")
-    else:
-        # 1. Run File System Analysis (Active files)
+    # --- MOCK SETUP: Create a dummy file to avoid errors if the hive is missing ---
+    if not os.path.exists(MOCK_REGISTRY_HIVE):
+        print(f"\n[!] Place a real Windows 'SYSTEM' hive file here, naming it: {MOCK_REGISTRY_HIVE}")
+        try:
+            with open(MOCK_REGISTRY_HIVE, 'w') as f:
+                f.write("")
+        except Exception:
+            pass # Ignore if creation fails
+
+    # --- EXECUTION ---
+    print("\n========================================================")
+    print("           DIGITAL FORENSICS SUITE - ANALYSIS")
+    print("========================================================\n")
+    
+    # 1. Run File System Analysis (Disk Content Listing)
+    if os.path.exists(IMAGE_TO_ANALYZE):
         analyze_disk_image(IMAGE_TO_ANALYZE)
-        
-        # 2. Run File Carving (Deleted/Fragmented data recovery)
-        perform_file_carving(IMAGE_TO_ANALYZE, CARVED_OUTPUT_DIR)
+    
+    # 2. Run File Carving (Deleted Data Recovery)
+    perform_file_carving(IMAGE_TO_ANALYZE, CARVED_OUTPUT_DIR)
+
+    # 3. Run Registry Analysis (The main focus of this task)
+    analyze_registry_hive(MOCK_REGISTRY_HIVE, "SYSTEM")
+    
+    print("\n========================================================\n")
